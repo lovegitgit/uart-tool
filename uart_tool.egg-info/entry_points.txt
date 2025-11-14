@@ -1,0 +1,3 @@
+[console_scripts]
+lsuart = uarttool.main:list_serial_ports
+uart-tool = uarttool.main:main
