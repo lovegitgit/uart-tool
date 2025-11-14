@@ -184,7 +184,7 @@ class UartController:
             if not cmd:
                 real_cmds = '\n' if self.no_end else '\r'
             else:
-                real_cmds = cmd + ('\n' if self.no_end else '\r')
+                real_cmds = cmd
             self.send_cmd(real_cmds)
         self.stop()
 
