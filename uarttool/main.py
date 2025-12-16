@@ -72,7 +72,7 @@ def print_dbg_msg(fmt, *args, **kwargs):
     cprintf(fmt, COLOR_DBG_MSG, *args, **kwargs)
 
 class UartController:
-    def __init__(self, port: str, baudrate: int, hex_mode=False, timeout=3, print_str=False, no_end=False):
+    def __init__(self, port: str, baudrate: int, hex_mode=False, timeout=3, print_str=False, end=None):
         self.ser = self.__open_serial(port, baudrate)
         self.last_sent_ts = 0
         self.hex_mode = hex_mode
@@ -80,7 +80,7 @@ class UartController:
         self.ser.timeout = timeout
         self.is_sending = False
         self.log_queue = queue.Queue()
-        self.no_end = no_end
+        self.end = bytes(end, 'utf-8').decode('unicode_escape') if end else None
         self.print_info()
 
     def send_cmd(self, cmd: bytes, test_mode=False):
@@ -182,9 +182,9 @@ class UartController:
             except (EOFError, KeyboardInterrupt):
                 break
             if not cmd:
-                real_cmds = '\n' if self.no_end else '\r'
+                real_cmds = self.end.encode('utf-8') if self.end else b''
             else:
-                real_cmds = cmd
+                real_cmds = cmd + (self.end if self.end else '')
             self.send_cmd(real_cmds)
         self.stop()
 
@@ -256,9 +256,9 @@ def main():
     parser.add_argument('--hex_mode', action='store_true', default=False, help='是否使用16进制模式')
     parser.add_argument('--print_str', action='store_true', default=False, help='是否打印字符串模式')
     parser.add_argument('--test_mode', action='store_true', default=False, help='是否进入测试模式')
-    parser.add_argument('-ue', '--use_end', action='store_true', default=False, help=r'是否使用末尾字符: \n')
+    parser.add_argument('-e', '--end', type=str, default=None, help=r'换行字符\\r或者\\n')
     args = parser.parse_args()
-    uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.print_str, args.use_end)
+    uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.print_str, args.end)
     if(args.test_mode):
         uart_controler.test()
     else:
