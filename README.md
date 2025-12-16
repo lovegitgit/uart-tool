@@ -8,7 +8,7 @@
 
 ```shell
 uart-tool -h
-usage: uart-tool [-h] -p COM_PORT [-b BAURATE] [-t TIMEOUT] [--hex_mode] [--print_str] [--test_mode] [-ue]
+usage: uart-tool [-h] -p COM_PORT [-b BAURATE] [-t TIMEOUT] [--hex_mode] [--print_str] [--test_mode] [-e END]
 
 uart tool 参数
 
@@ -23,7 +23,7 @@ options:
   --hex_mode            是否使用16进制模式
   --print_str           是否打印字符串模式
   --test_mode           是否进入测试模式
-  -ue, --use_end        是否使用末尾字符: \n
+  -e END, --end END     换行字符\r或者\n
 ```
 
 ### lsuart
