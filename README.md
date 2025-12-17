@@ -23,7 +23,7 @@ options:
   --hex_mode            是否使用16进制模式
   --print_str           是否打印字符串模式
   --test_mode           是否进入测试模式
-  -e END, --end END     换行字符\r或者\n
+  -e END, --end END     换行字符\r或者\n, 默认\r
 ```
 
 ### lsuart
