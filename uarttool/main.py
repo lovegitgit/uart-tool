@@ -243,7 +243,6 @@ def parse_bytes_to_bin(byte_data: bytes):
     return binary
 
 def list_serial_ports():
-    ports = []
     for p in list_ports.comports():
         uart_dsc = f' {p.device}: {p.description}'
         print_dbg_msg(uart_dsc)
@@ -256,7 +255,7 @@ def main():
     parser.add_argument('--hex_mode', action='store_true', default=False, help='是否使用16进制模式')
     parser.add_argument('--print_str', action='store_true', default=False, help='是否打印字符串模式')
     parser.add_argument('--test_mode', action='store_true', default=False, help='是否进入测试模式')
-    parser.add_argument('-e', '--end', type=str, default=None, help=r'换行字符\r或者\n')
+    parser.add_argument('-e', '--end', type=str, default='\r', help=r'换行字符\r或者\n, 默认\r')
     args = parser.parse_args()
     uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.print_str, args.end)
     if(args.test_mode):
