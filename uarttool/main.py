@@ -2,53 +2,73 @@
 # -*- encoding: utf-8 -*-
 
 import argparse
-import functools
 import threading
-from typing import List
+from typing import Iterable
 import serial
 from serial.tools import list_ports
 import queue
-from threading import Lock
 import signal
-
-stop_event = threading.Event()
-
-def signal_handler(sig, frame):
-    stop_event.set()
-
-signal.signal(signal.SIGINT, signal_handler)
-
+import time
+import sys
 from colorama import init, Fore, Style
 # 初始化 colorama（Windows 下需要）
 init(autoreset=True)
 
+g_stop_event = threading.Event()
+
+def signal_handler(sig, frame):
+    g_stop_event.set()
+
+signal.signal(signal.SIGINT, signal_handler)
+
+
 COLOR_OUTPUT_STR = Fore.LIGHTBLUE_EX
 COLOR_OUTPUT_HEX = Fore.LIGHTCYAN_EX
 COLOR_DBG_MSG = Fore.LIGHTGREEN_EX
+# Precompute hex table for fast conversion
+HEX_TABLE = [f"0x{b:02x}" for b in range(256)]
+
+# Print queue & worker to avoid heavy locking / contention on print
+g_print_queue = queue.Queue()
 
 
+class PrintWorker(threading.Thread):
+    def __init__(self, q: queue.Queue):
+        # Do NOT make this a daemon thread: we must join it on shutdown
+        super().__init__(name="PrintWorker")
+        self.q = q
+        self._stopped = g_stop_event
 
-# Global lock for synchronizing access to shared resources
-globalLock = Lock()
-def synchronized(func):
-    """装饰器：让函数在同一时间只有一个线程能运行"""
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        with globalLock:  # 加锁
-            return func(*args, **kwargs)
-    return wrapper
+    def stop(self):
+        self._stopped.set()
 
-# 封装彩色打印函数
-@synchronized
-def cprintf(fmt, color=Fore.WHITE, *args, end='\n', **kwargs):
+    def run(self):
+        # Drain queue on stop: continue processing until _stopped and queue empty
+        while True:
+            # exit when stopped and queue drained
+            if self._stopped.is_set() and self.q.empty():
+                break
+            try:
+                # write directly to stdout to be slightly faster than print()
+                color, text, end = self.q.get(timeout=0.3)
+                sys.stdout.write(f"{color}{text}{Style.RESET_ALL}")
+                if end:
+                    sys.stdout.write(end)
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+
+g_print_worker = PrintWorker(g_print_queue)
+# g_print_worker.start()
+
+def cprintf_queue(fmt, color=Fore.WHITE, *args, end='\n', **kwargs):
     """
-    彩色打印函数（安全版）：
-    - 只有在传入 args/kwargs 时才尝试使用 str.format
-    - 否则直接将 fmt 转为字符串输出，避免因为未转义的大括号导致异常
+    Minimal safe formatting then enqueue to print worker.
+    Only format when args/kwargs present to avoid accidental format errors.
     """
     try:
         if args or kwargs:
-            # 仅在有格式参数时尝试 format，遇到异常回退到原始字符串
             try:
                 text = str(fmt).format(*args, **kwargs)
             except Exception:
@@ -57,19 +77,20 @@ def cprintf(fmt, color=Fore.WHITE, *args, end='\n', **kwargs):
             text = str(fmt)
     except Exception:
         text = repr(fmt)
-    print(f"{color}{text}{Style.RESET_ALL}", end=end)
+    g_print_queue.put((color, text, end))
+
 
 def print_output_str(fmt, *args, **kwargs):
-    """封装输出函数"""
-    cprintf(fmt, COLOR_OUTPUT_STR, *args, end='', **kwargs)
+    cprintf_queue(fmt, COLOR_OUTPUT_STR, *args, **kwargs, end='')
+
 
 def print_output_hex(fmt, *args, **kwargs):
-    """封装输出十六进制函数"""
-    cprintf(fmt, COLOR_OUTPUT_HEX, *args, **kwargs)
+    cprintf_queue(fmt, COLOR_OUTPUT_HEX, *args, **kwargs)
+
 
 def print_dbg_msg(fmt, *args, **kwargs):
-    """封装调试消息函数"""
-    cprintf(fmt, COLOR_DBG_MSG, *args, **kwargs)
+    cprintf_queue(fmt, COLOR_DBG_MSG, *args, **kwargs)
+
 
 class UartController:
     def __init__(self, port: str, baudrate: int, hex_mode=False, timeout=3, print_str=False, end=None):
@@ -81,23 +102,58 @@ class UartController:
         self.is_sending = False
         self.log_queue = queue.Queue()
         self.end = bytes(end, 'utf-8').decode('unicode_escape') if end else None
+        g_print_worker.start()
         self.print_info()
 
-    def send_cmd(self, cmd: bytes, test_mode=False):
-        if not cmd:
+    def send_cmd(self, cmd, test_mode=False):
+        """
+        Accepts:
+          - str (will be encoded unless hex_mode)
+          - bytes/bytearray (sent as-is)
+          - list/tuple of ints when hex_mode (converted to bytes)
+          - iterable of hex-strings when hex_mode (converted)
+        """
+        if cmd is None or cmd == '':
             return
         self.is_sending = True
-        if self.hex_mode:
-            if isinstance(cmd, str):
-                cmd = cmd.replace(',', '')
-                cmd = cmd.split()
-                cmd = convert_cmd_to_bytes(cmd)
-        else:
-            if isinstance(cmd, str):
-                cmd = cmd.encode('utf-8')
         try:
-            if cmd:
-                self.ser.write(cmd)
+            to_send = None
+            if self.hex_mode:
+                # If already bytes/bytearray, use it
+                if isinstance(cmd, (bytes, bytearray)):
+                    to_send = bytes(cmd)
+                elif isinstance(cmd, str):
+                    # strip commas and whitespace, split on spaces
+                    cleaned = cmd.replace(',', ' ')
+                    parts = [p for p in cleaned.split() if p]
+                    to_send = convert_cmd_to_bytes(parts)
+                elif isinstance(cmd, (list, tuple)):
+                    to_send = convert_cmd_to_bytes(cmd)
+                else:
+                    # last resort: try to convert to bytes directly
+                    try:
+                        to_send = bytes(cmd)
+                    except Exception:
+                        print_dbg_msg(f'Unsupported cmd type in hex_mode: {type(cmd)}')
+                        to_send = b''
+            else:
+                if isinstance(cmd, (bytes, bytearray)):
+                    to_send = bytes(cmd)
+                elif isinstance(cmd, str):
+                    to_send = cmd.encode('utf-8')
+                elif isinstance(cmd, (list, tuple)):
+                    # join items as str and encode
+                    joined = ''.join(map(str, cmd))
+                    to_send = joined.encode('utf-8')
+                else:
+                    try:
+                        to_send = bytes(cmd)
+                    except Exception:
+                        print_dbg_msg(f'Unsupported cmd type: {type(cmd)}')
+                        to_send = b''
+            if to_send:
+                # Write once and flush
+                self.ser.write(to_send)
                 self.ser.flush()
         except Exception as e:
             print_dbg_msg(f'TX error: {e}')
@@ -111,12 +167,14 @@ class UartController:
             if response:
                 print_output_hex(parse_bytes_to_hex_str(response))
                 if self.print_str or not self.hex_mode:
-                    print_output_str(get_str_info(response))
+                    s = get_str_info(response)
+                    if s:
+                        print_output_str(s)
         except Exception as e:
-            print('RX error:', e)
+            print_dbg_msg(f'RX error: {e}')
 
     def test(self):
-        print("Starting test!")
+        print_dbg_msg("Starting test!")
         print_dbg_msg('send [0x5a, 0xa6]')
         self.send_cmd([0x5a, 0xa6], True)
         print_dbg_msg('send [0x5a, 0xa6]')
@@ -147,58 +205,98 @@ class UartController:
             if ser.is_open:
                 return ser
         except Exception as e:
-            raise(e)
-        raise(RuntimeError('Cannot open port {}'.format(port)))
+            raise e
+        raise RuntimeError('Cannot open port {}'.format(port))
 
     def read_ser_response_continuously(self):
-        while not stop_event.is_set():
+        """
+        Read from serial and push raw bytes to log_queue. Use in_waiting to avoid busy-waiting.
+        """
+        ser = self.ser
+        qput = self.log_queue.put_nowait
+        # read max chunk size
+        max_read = 4096
+        while not g_stop_event.is_set():
             try:
-                response = self.ser.read_all()
-                if response:
-                    self.log_queue.put_nowait(response)
+                waiting = getattr(ser, 'in_waiting', None)
+                if waiting:
+                    to_read = min(waiting, max_read)
+                    data = ser.read(to_read)
+                else:
+                    # blocking read up to 1024 bytes (ser.timeout controls blocking)
+                    data = ser.read(1024)
+                if data:
+                    try:
+                        qput(data)
+                    except queue.Full:
+                        # if queue bounded and full, drop or sleep briefly
+                        time.sleep(0.001)
+                else:
+                    # avoid busy loop if device returns empty often
+                    time.sleep(0.001)
             except Exception:
-                pass
+                # on unexpected error, sleep a bit to avoid tight noisy loop
+                time.sleep(0.01)
         self.stop()
 
     def log_serial_data(self):
-        while not stop_event.is_set():
+        """
+        Consume raw byte chunks, format them (hex/string) and enqueue to print queue.
+        Doing formatting here reduces burden on print thread and centralizes conversion.
+        """
+        pq_put = g_print_queue.put
+        hex_mode = self.hex_mode
+        print_str_flag = self.print_str
+        while not g_stop_event.is_set():
             try:
                 data = self.log_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
             try:
-                if self.hex_mode:
-                    print_output_hex(parse_bytes_to_hex_str(data))
-                if self.print_str or not self.hex_mode:
-                    print_output_str(get_str_info(data))
+                if hex_mode:
+                    txt = parse_bytes_to_hex_str(data)
+                    # hex lines should have newline
+                    pq_put((COLOR_OUTPUT_HEX, txt, '\n'))
+                if print_str_flag or not hex_mode:
+                    s = get_str_info(data)
+                    if s:
+                        # keep string outputs without adding extra newline (consistent with original)
+                        pq_put((COLOR_OUTPUT_STR, s, ''))
             except Exception as e:
                 print_dbg_msg(f'log_serial_data error: {e}')
         self.stop()
 
     def trans_cmd_to_tx(self):
-        while not stop_event.is_set():
+        """
+        Read from stdin and send. Input is string; append end (string) if configured.
+        """
+        while not g_stop_event.is_set():
             try:
                 cmd = input()
             except (EOFError, KeyboardInterrupt):
                 break
-            if not cmd:
-                real_cmds = self.end.encode('utf-8') if self.end else b''
+            # cmd is a str; if empty, send only end (if configured)
+            if cmd == '':
+                real_cmds = self.end if self.end else ''
             else:
                 real_cmds = cmd + (self.end if self.end else '')
             self.send_cmd(real_cmds)
         self.stop()
 
     def __start_rx_thread(self):
-        rx_thread = threading.Thread(target=self.read_ser_response_continuously, daemon=True)
+        rx_thread = threading.Thread(target=self.read_ser_response_continuously, daemon=True, name="uart-rx")
         rx_thread.start()
+        # self._threads.append(rx_thread)
 
     def __start_tx_thread(self):
-        tx_thread = threading.Thread(target=self.trans_cmd_to_tx)
+        tx_thread = threading.Thread(target=self.trans_cmd_to_tx, daemon=True, name="uart-tx")
         tx_thread.start()
+        # self._threads.append(tx_thread)
 
     def __start_log_thread(self):
-        log_thread = threading.Thread(target=self.log_serial_data, daemon=True)
+        log_thread = threading.Thread(target=self.log_serial_data, daemon=True, name="uart-log")
         log_thread.start()
+        # self._threads.append(log_thread)
 
     def run(self):
         self.__start_rx_thread()
@@ -206,62 +304,116 @@ class UartController:
         self.__start_log_thread()
 
     def stop(self):
-        stop_event.set()
+        # signal stop and close serial
+        g_stop_event.set()
         try:
             if self.ser and self.ser.is_open:
-                self.ser.flush()
-                self.ser.close()
+                try:
+                    self.ser.flush()
+                except Exception:
+                    pass
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
         except Exception:
             pass
 
-def convert_cmd_to_bytes(datas: List[hex]):
+
+def convert_cmd_to_bytes(datas: Iterable):
+    """
+    Efficient conversion:
+      - if iterable of ints -> bytes(iterable)
+      - if iterable of hex-strings -> concatenate normalized hex and bytes.fromhex
+    Returns bytes or b'' on error.
+    """
+    if not datas:
+        return b''
+    # make iterator for safe peeking
     try:
-        tmp_data = ''.join(f'{int(str(data), 16):02x}' for data in datas)
-        byte_data = bytes.fromhex(tmp_data)
-        return byte_data
+        iterator = iter(datas)
+    except TypeError:
+        return b''
+    try:
+        first = next(iterator)
+    except StopIteration:
+        return b''
+    # When first is int, reconstruct full list (first + rest)
+    if isinstance(first, int):
+        try:
+            ints = [first] + list(iterator)
+            return bytes(ints)
+        except Exception as e:
+            print_dbg_msg(f'convert_cmd_to_bytes error (ints): {e}')
+            return b''
+    # otherwise treat as hex strings (put back first)
+    parts = []
+    try:
+        s = str(first).strip()
+        if s.startswith(('0x', '0X')):
+            s = s[2:]
+        if len(s) == 1:
+            s = '0' + s
+        if s:
+            parts.append(s)
+        for d in iterator:
+            sd = str(d).strip()
+            if sd.startswith(('0x', '0X')):
+                sd = sd[2:]
+            if len(sd) == 1:
+                sd = '0' + sd
+            if sd:
+                parts.append(sd)
+        hexstr = ''.join(parts)
+        if not hexstr:
+            return b''
+        return bytes.fromhex(hexstr)
     except ValueError as e:
         print_dbg_msg(f'convert_cmd_to_bytes error: {e}')
+        return b''
+
 
 def get_str_info(response: bytes):
     try:
-        return response.decode('utf-8')
-    except:
-        # print('decode RX[HEX] to String error!')
-        pass
-    return ''
+        return response.decode('utf-8', errors='ignore')
+    except Exception:
+        return ''
+
 
 def parse_bytes_to_hex_str(byte_data: bytes):
-    return ' '.join(f"0x{byte:02x}" for byte in byte_data)
+    # Use lookup table for speed
+    return ' '.join(HEX_TABLE[b] for b in byte_data)
 
 
 def parse_str_to_bytes(str_data: str):
-    byte_data = [ord(chr(s)) for s in str_data]
-    return ' '.join(f"0x{byte:02x}" for byte in byte_data)
-
-def parse_bytes_to_bin(byte_data: bytes):
-    binary = ''.join(format(byte, '08b') for byte in byte_data)
-    return binary
+    # Encode then show hex bytes
+    try:
+        b = str_data.encode('utf-8')
+        return ' '.join(f"0x{byte:02x}" for byte in b)
+    except Exception:
+        return ''
 
 def list_serial_ports():
+    g_print_worker.start()
     for p in list_ports.comports():
         uart_dsc = f' {p.device}: {p.description}'
         print_dbg_msg(uart_dsc)
+    g_stop_event.set()
+
 
 def main():
     parser = argparse.ArgumentParser(description='uart tool 参数')
-    parser.add_argument('-p', '--com_port', type=str, required = True, help='COM 串口名字')
+    parser.add_argument('-p', '--com_port', type=str, required=True, help='COM 串口名字')
     parser.add_argument('-b', '--baurate', type=int, default=115200, help='COM 口波特率配置,默认115200')
     parser.add_argument('-t', '--timeout', type=float, default=0.1, help='COM 读写消息间隔,默认0.1')
     parser.add_argument('--hex_mode', action='store_true', default=False, help='是否使用16进制模式')
     parser.add_argument('--print_str', action='store_true', default=False, help='是否打印字符串模式')
-    parser.add_argument('--test_mode', action='store_true', default=False, help='是否进入测试模式')
-    parser.add_argument('-e', '--end', type=str, default='\r', help=r'换行字符\r或者\n, 默认\r')
+    # allow `-e` with no value or explicit empty string to mean "no end/newline"
+    parser.add_argument('-e', '--end', type=str, default='\\r', nargs='?', const='', help=r"换行字符\r或者\n, 默认\r (使用 -e '' 或 -e 传空字符串表示不追加换行)")
     args = parser.parse_args()
     uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.print_str, args.end)
-    if(args.test_mode):
-        uart_controler.test()
-    else:
-        uart_controler.run()
+    uart_controler.run()
+
 
 if __name__ == '__main__':
     main()
