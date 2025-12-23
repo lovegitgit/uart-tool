@@ -3,7 +3,7 @@
 
 import argparse
 import threading
-from typing import Iterable
+from typing import List
 import serial
 from serial.tools import list_ports
 import queue
@@ -34,7 +34,6 @@ g_print_queue = queue.Queue()
 
 class PrintWorker(threading.Thread):
     def __init__(self, q: queue.Queue):
-        # Do NOT make this a daemon thread: we must join it on shutdown
         super().__init__(name="PrintWorker")
         self.q = q
         self._stopped = g_stop_event
@@ -43,13 +42,10 @@ class PrintWorker(threading.Thread):
         self._stopped.set()
 
     def run(self):
-        # Drain queue on stop: continue processing until _stopped and queue empty
         while True:
-            # exit when stopped and queue drained
             if self._stopped.is_set() and self.q.empty():
                 break
             try:
-                # write directly to stdout to be slightly faster than print()
                 color, text, end = self.q.get(timeout=0.3)
                 sys.stdout.write(f"{color}{text}{Style.RESET_ALL}")
                 if end:
@@ -60,13 +56,8 @@ class PrintWorker(threading.Thread):
 
 
 g_print_worker = PrintWorker(g_print_queue)
-# g_print_worker.start()
 
-def cprintf_queue(fmt, color=Fore.WHITE, *args, end='\n', **kwargs):
-    """
-    Minimal safe formatting then enqueue to print worker.
-    Only format when args/kwargs present to avoid accidental format errors.
-    """
+def cprintf_queue(fmt, color=Fore.WHITE, *args, end='', **kwargs):
     try:
         if args or kwargs:
             try:
@@ -105,55 +96,21 @@ class UartController:
         g_print_worker.start()
         self.print_info()
 
-    def send_cmd(self, cmd, test_mode=False):
-        """
-        Accepts:
-          - str (will be encoded unless hex_mode)
-          - bytes/bytearray (sent as-is)
-          - list/tuple of ints when hex_mode (converted to bytes)
-          - iterable of hex-strings when hex_mode (converted)
-        """
-        if cmd is None or cmd == '':
+    def send_cmd(self, cmd: bytes, test_mode=False):
+        if not cmd or cmd == b'':
             return
         self.is_sending = True
+        if self.hex_mode:
+            if isinstance(cmd, str):
+                cmd = cmd.replace(',', '')
+                cmd = cmd.split()
+                cmd = convert_cmd_to_bytes(cmd)
+        else:
+            if isinstance(cmd, str):
+                cmd = cmd.encode('utf-8')
         try:
-            to_send = None
-            if self.hex_mode:
-                # If already bytes/bytearray, use it
-                if isinstance(cmd, (bytes, bytearray)):
-                    to_send = bytes(cmd)
-                elif isinstance(cmd, str):
-                    # strip commas and whitespace, split on spaces
-                    cleaned = cmd.replace(',', ' ')
-                    parts = [p for p in cleaned.split() if p]
-                    to_send = convert_cmd_to_bytes(parts)
-                elif isinstance(cmd, (list, tuple)):
-                    to_send = convert_cmd_to_bytes(cmd)
-                else:
-                    # last resort: try to convert to bytes directly
-                    try:
-                        to_send = bytes(cmd)
-                    except Exception:
-                        print_dbg_msg(f'Unsupported cmd type in hex_mode: {type(cmd)}')
-                        to_send = b''
-            else:
-                if isinstance(cmd, (bytes, bytearray)):
-                    to_send = bytes(cmd)
-                elif isinstance(cmd, str):
-                    to_send = cmd.encode('utf-8')
-                elif isinstance(cmd, (list, tuple)):
-                    # join items as str and encode
-                    joined = ''.join(map(str, cmd))
-                    to_send = joined.encode('utf-8')
-                else:
-                    try:
-                        to_send = bytes(cmd)
-                    except Exception:
-                        print_dbg_msg(f'Unsupported cmd type: {type(cmd)}')
-                        to_send = b''
-            if to_send:
-                # Write once and flush
-                self.ser.write(to_send)
+            if cmd:
+                self.ser.write(cmd)
                 self.ser.flush()
         except Exception as e:
             print_dbg_msg(f'TX error: {e}')
@@ -304,7 +261,6 @@ class UartController:
         self.__start_log_thread()
 
     def stop(self):
-        # signal stop and close serial
         g_stop_event.set()
         try:
             if self.ser and self.ser.is_open:
@@ -320,58 +276,13 @@ class UartController:
             pass
 
 
-def convert_cmd_to_bytes(datas: Iterable):
-    """
-    Efficient conversion:
-      - if iterable of ints -> bytes(iterable)
-      - if iterable of hex-strings -> concatenate normalized hex and bytes.fromhex
-    Returns bytes or b'' on error.
-    """
-    if not datas:
-        return b''
-    # make iterator for safe peeking
+def convert_cmd_to_bytes(datas: List[hex]):
     try:
-        iterator = iter(datas)
-    except TypeError:
-        return b''
-    try:
-        first = next(iterator)
-    except StopIteration:
-        return b''
-    # When first is int, reconstruct full list (first + rest)
-    if isinstance(first, int):
-        try:
-            ints = [first] + list(iterator)
-            return bytes(ints)
-        except Exception as e:
-            print_dbg_msg(f'convert_cmd_to_bytes error (ints): {e}')
-            return b''
-    # otherwise treat as hex strings (put back first)
-    parts = []
-    try:
-        s = str(first).strip()
-        if s.startswith(('0x', '0X')):
-            s = s[2:]
-        if len(s) == 1:
-            s = '0' + s
-        if s:
-            parts.append(s)
-        for d in iterator:
-            sd = str(d).strip()
-            if sd.startswith(('0x', '0X')):
-                sd = sd[2:]
-            if len(sd) == 1:
-                sd = '0' + sd
-            if sd:
-                parts.append(sd)
-        hexstr = ''.join(parts)
-        if not hexstr:
-            return b''
-        return bytes.fromhex(hexstr)
+        tmp_data = ''.join(f'{int(str(data), 16):02x}' for data in datas)
+        byte_data = bytes.fromhex(tmp_data)
+        return byte_data
     except ValueError as e:
         print_dbg_msg(f'convert_cmd_to_bytes error: {e}')
-        return b''
-
 
 def get_str_info(response: bytes):
     try:
@@ -409,7 +320,7 @@ def main():
     parser.add_argument('--hex_mode', action='store_true', default=False, help='是否使用16进制模式')
     parser.add_argument('--print_str', action='store_true', default=False, help='是否打印字符串模式')
     # allow `-e` with no value or explicit empty string to mean "no end/newline"
-    parser.add_argument('-e', '--end', type=str, default='\\r', nargs='?', const='', help=r"换行字符\r或者\n, 默认\r (使用 -e '' 或 -e 传空字符串表示不追加换行)")
+    parser.add_argument('-e', '--end', type=str, default='\r', nargs='?', const='', help=r"换行字符\r或者\n, 默认\r (使用 -e '' 或 -e 传空字符串表示不追加换行)")
     args = parser.parse_args()
     uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.print_str, args.end)
     uart_controler.run()
