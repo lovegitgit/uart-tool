@@ -57,7 +57,7 @@ class PrintWorker(threading.Thread):
 
 g_print_worker = PrintWorker(g_print_queue)
 
-def cprintf_queue(fmt, color=Fore.WHITE, *args, end='', **kwargs):
+def cprintf_queue(fmt, color=Fore.WHITE, *args, end='\n', **kwargs):
     try:
         if args or kwargs:
             try:
@@ -309,7 +309,7 @@ def list_serial_ports():
     for p in list_ports.comports():
         uart_dsc = f' {p.device}: {p.description}'
         print_dbg_msg(uart_dsc)
-    g_stop_event.set()
+    g_print_worker.stop()
 
 
 def main():
