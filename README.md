@@ -8,11 +8,11 @@
 
 ```shell
 uart-tool -h
-usage: uart-tool [-h] -p COM_PORT [-b BAURATE] [-t TIMEOUT] [--hex_mode] [--print_str] [--test_mode] [-e END]
+usage: uart-tool [-h] -p COM_PORT [-b BAURATE] [-t TIMEOUT] [--hex_mode] [--print_str] [-e [END]]
 
 uart tool 参数
 
-options:
+optional arguments:
   -h, --help            show this help message and exit
   -p COM_PORT, --com_port COM_PORT
                         COM 串口名字
@@ -22,8 +22,8 @@ options:
                         COM 读写消息间隔,默认0.1
   --hex_mode            是否使用16进制模式
   --print_str           是否打印字符串模式
-  --test_mode           是否进入测试模式
-  -e END, --end END     换行字符\r或者\n, 默认\r
+  -e [END], --end [END]
+                        换行字符\r或者\n, 默认\r (使用 -e '' 或 -e 传空字符串表示不追加换行)
 ```
 
 ### lsuart
