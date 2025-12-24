@@ -8,7 +8,7 @@ import serial
 from serial.tools import list_ports
 import queue
 import signal
-import time
+from time import sleep
 import sys
 from colorama import init, Fore, Style
 # 初始化 colorama（Windows 下需要）
@@ -28,36 +28,13 @@ COLOR_DBG_MSG = Fore.LIGHTGREEN_EX
 # Precompute hex table for fast conversion
 HEX_TABLE = [f"0x{b:02x}" for b in range(256)]
 
-# Print queue & worker to avoid heavy locking / contention on print
-g_print_queue = queue.Queue()
+def print_with_color_internal(color, text, end='\n'):
+    sys.stdout.write(f"{color}{text}{Style.RESET_ALL}")
+    if end:
+        sys.stdout.write(end)
+    sys.stdout.flush()
 
-
-class PrintWorker(threading.Thread):
-    def __init__(self, q: queue.Queue):
-        super().__init__(name="PrintWorker")
-        self.q = q
-        self._stopped = g_stop_event
-
-    def stop(self):
-        self._stopped.set()
-
-    def run(self):
-        while True:
-            if self._stopped.is_set() and self.q.empty():
-                break
-            try:
-                color, text, end = self.q.get(timeout=0.3)
-                sys.stdout.write(f"{color}{text}{Style.RESET_ALL}")
-                if end:
-                    sys.stdout.write(end)
-                sys.stdout.flush()
-            except Exception:
-                pass
-
-
-g_print_worker = PrintWorker(g_print_queue)
-
-def cprintf_queue(fmt, color=Fore.WHITE, *args, end='\n', **kwargs):
+def print_wrapper(fmt, color=Fore.WHITE, *args, end='\n', **kwargs):
     try:
         if args or kwargs:
             try:
@@ -68,19 +45,19 @@ def cprintf_queue(fmt, color=Fore.WHITE, *args, end='\n', **kwargs):
             text = str(fmt)
     except Exception:
         text = repr(fmt)
-    g_print_queue.put((color, text, end))
+    print_with_color_internal(color, text, end)
 
 
 def print_output_str(fmt, *args, **kwargs):
-    cprintf_queue(fmt, COLOR_OUTPUT_STR, *args, **kwargs, end='')
+    print_wrapper(fmt, COLOR_OUTPUT_STR, *args, **kwargs, end='')
 
 
 def print_output_hex(fmt, *args, **kwargs):
-    cprintf_queue(fmt, COLOR_OUTPUT_HEX, *args, **kwargs)
+    print_wrapper(fmt, COLOR_OUTPUT_HEX, *args, **kwargs)
 
 
 def print_dbg_msg(fmt, *args, **kwargs):
-    cprintf_queue(fmt, COLOR_DBG_MSG, *args, **kwargs)
+    print_wrapper(fmt, COLOR_DBG_MSG, *args, **kwargs)
 
 
 class UartController:
@@ -93,7 +70,6 @@ class UartController:
         self.is_sending = False
         self.log_queue = queue.Queue()
         self.end = bytes(end, 'utf-8').decode('unicode_escape') if end else None
-        g_print_worker.start()
         self.print_info()
 
     def send_cmd(self, cmd: bytes, test_mode=False):
@@ -153,8 +129,7 @@ class UartController:
         if self.hex_mode:
             print_output_hex(f"  Output Hex: 0xff")
         if self.print_str or not self.hex_mode:
-            print_output_str(f"  Output String: 0xff")
-        print_dbg_msg('')
+            print_output_str(f"  Output String: 0xff\n")
 
     def __open_serial(self, port, baudrate):
         try:
@@ -166,9 +141,6 @@ class UartController:
         raise RuntimeError('Cannot open port {}'.format(port))
 
     def read_ser_response_continuously(self):
-        """
-        Read from serial and push raw bytes to log_queue. Use in_waiting to avoid busy-waiting.
-        """
         ser = self.ser
         qput = self.log_queue.put_nowait
         # read max chunk size
@@ -180,28 +152,19 @@ class UartController:
                     to_read = min(waiting, max_read)
                     data = ser.read(to_read)
                 else:
-                    # blocking read up to 1024 bytes (ser.timeout controls blocking)
                     data = ser.read(1024)
                 if data:
                     try:
                         qput(data)
                     except queue.Full:
-                        # if queue bounded and full, drop or sleep briefly
-                        time.sleep(0.001)
+                        sleep(1e-3)
                 else:
-                    # avoid busy loop if device returns empty often
-                    time.sleep(0.001)
+                    sleep(1e-3)
             except Exception:
-                # on unexpected error, sleep a bit to avoid tight noisy loop
-                time.sleep(0.01)
+                sleep(1e-3)
         self.stop()
 
     def log_serial_data(self):
-        """
-        Consume raw byte chunks, format them (hex/string) and enqueue to print queue.
-        Doing formatting here reduces burden on print thread and centralizes conversion.
-        """
-        pq_put = g_print_queue.put
         hex_mode = self.hex_mode
         print_str_flag = self.print_str
         while not g_stop_event.is_set():
@@ -211,14 +174,13 @@ class UartController:
                 continue
             try:
                 if hex_mode:
-                    txt = parse_bytes_to_hex_str(data)
+                    hex_str = parse_bytes_to_hex_str(data)
                     # hex lines should have newline
-                    pq_put((COLOR_OUTPUT_HEX, txt, '\n'))
+                    print_output_hex(hex_str)
                 if print_str_flag or not hex_mode:
-                    s = get_str_info(data)
-                    if s:
-                        # keep string outputs without adding extra newline (consistent with original)
-                        pq_put((COLOR_OUTPUT_STR, s, ''))
+                    txt = get_str_info(data)
+                    if txt:
+                        print_output_str(txt)
             except Exception as e:
                 print_dbg_msg(f'log_serial_data error: {e}')
         self.stop()
@@ -243,17 +205,14 @@ class UartController:
     def __start_rx_thread(self):
         rx_thread = threading.Thread(target=self.read_ser_response_continuously, daemon=True, name="uart-rx")
         rx_thread.start()
-        # self._threads.append(rx_thread)
 
     def __start_tx_thread(self):
         tx_thread = threading.Thread(target=self.trans_cmd_to_tx, daemon=True, name="uart-tx")
         tx_thread.start()
-        # self._threads.append(tx_thread)
 
     def __start_log_thread(self):
-        log_thread = threading.Thread(target=self.log_serial_data, daemon=True, name="uart-log")
+        log_thread = threading.Thread(target=self.log_serial_data, name="uart-log")
         log_thread.start()
-        # self._threads.append(log_thread)
 
     def run(self):
         self.__start_rx_thread()
@@ -305,11 +264,9 @@ def parse_str_to_bytes(str_data: str):
         return ''
 
 def list_serial_ports():
-    g_print_worker.start()
     for p in list_ports.comports():
         uart_dsc = f' {p.device}: {p.description}'
         print_dbg_msg(uart_dsc)
-    g_print_worker.stop()
 
 
 def main():
