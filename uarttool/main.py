@@ -61,21 +61,24 @@ def print_dbg_msg(fmt, *args, **kwargs):
 
 
 class UartController:
-    def __init__(self, port: str, baudrate: int, hex_mode=False, timeout=3, print_str=False, end=None):
+    def __init__(self, port: str, baudrate: int, hex_mode=False, timeout=3, print_str=False, end=None, test_mode=False):
         self.ser = self.__open_serial(port, baudrate)
         self.last_sent_ts = 0
         self.hex_mode = hex_mode
         self.print_str = print_str
         self.ser.timeout = timeout
-        self.is_sending = False
         self.log_queue = queue.Queue()
         self.end = bytes(end, 'utf-8').decode('unicode_escape') if end else None
+        self.test_mode = test_mode
+        if self.test_mode:
+            self.hex_mode = True
+            self.print_str = False
+            print_dbg_msg('Uart Controller started in TEST MODE, only support send hex commands.')
         self.print_info()
 
-    def send_cmd(self, cmd: bytes, test_mode=False):
+    def send_cmd(self, cmd: bytes):
         if not cmd or cmd == b'':
             return
-        self.is_sending = True
         if self.hex_mode:
             if isinstance(cmd, str):
                 cmd = cmd.replace(',', '')
@@ -90,34 +93,25 @@ class UartController:
                 self.ser.flush()
         except Exception as e:
             print_dbg_msg(f'TX error: {e}')
-        if test_mode:
-            self.read_cmd_res()
-        self.is_sending = False
-
-    def read_cmd_res(self):
-        try:
-            response = self.ser.read(1024)
-            if response:
-                print_output_hex(parse_bytes_to_hex_str(response))
-                if self.print_str or not self.hex_mode:
-                    s = get_str_info(response)
-                    if s:
-                        print_output_str(s)
-        except Exception as e:
-            print_dbg_msg(f'RX error: {e}')
 
     def test(self):
         print_dbg_msg("Starting test!")
         print_dbg_msg('send [0x5a, 0xa6]')
-        self.send_cmd([0x5a, 0xa6], True)
+        self.send_cmd(bytes([0x5a, 0xa6]))
+        # wait for response
+        sleep(5e-1)
         print_dbg_msg('send [0x5a, 0xa6]')
-        self.send_cmd([0x5a, 0xa6], True)
+        self.send_cmd(bytes([0x5a, 0xa6]))
+        sleep(5e-1)
         print_dbg_msg('send [0x5a, 0xa6]')
-        self.send_cmd([0x5a, 0xa6], True)
+        self.send_cmd(bytes([0x5a, 0xa6]))
+        sleep(5e-1)
         print_dbg_msg('send [0x5A, 0xA4, 0x0C, 0x00, 0x4B, 0x33, 0x07, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]')
-        self.send_cmd([0x5A, 0xA4, 0x0C, 0x00, 0x4B, 0x33, 0x07, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], True)
+        self.send_cmd(bytes([0x5A, 0xA4, 0x0C, 0x00, 0x4B, 0x33, 0x07, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
+        sleep(5e-1)
         print_dbg_msg('send [0x5a, 0xa1]')
-        self.send_cmd([0x5a, 0xa1], False)
+        self.send_cmd(bytes([0x5a, 0xa1]))
+        sleep(2e-1)
 
     def print_info(self):
         print_dbg_msg("UART Info:")
@@ -218,6 +212,8 @@ class UartController:
         self.__start_rx_thread()
         self.__start_tx_thread()
         self.__start_log_thread()
+        if self.test_mode:
+            self.test()
 
     def stop(self):
         g_stop_event.set()
@@ -278,8 +274,9 @@ def main():
     parser.add_argument('--print_str', action='store_true', default=False, help='是否打印字符串模式')
     # allow `-e` with no value or explicit empty string to mean "no end/newline"
     parser.add_argument('-e', '--end', type=str, default='\r', nargs='?', const='', help=r"换行字符\r或者\n, 默认\r (使用 -e '' 或 -e 传空字符串表示不追加换行)")
+    parser.add_argument('--test_mode', action='store_true', default=False, help='开启测试模式，发送预设命令')
     args = parser.parse_args()
-    uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.print_str, args.end)
+    uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.print_str, args.end, args.test_mode)
     uart_controler.run()
 
 
