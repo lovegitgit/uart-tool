@@ -61,12 +61,11 @@ def print_dbg_msg(fmt, *args, **kwargs):
 
 
 class UartController:
-    def __init__(self, port: str, baudrate: int, hex_mode=False, timeout=3, print_str=False, end=None, test_mode=False):
-        self.ser = self.__open_serial(port, baudrate)
+    def __init__(self, port: str, baudrate: int, hex_mode=False, timeout=3, write_timeout=1, print_str=False, end=None, test_mode=False):
+        self.ser = self.__open_serial(port, baudrate, timeout, write_timeout)
         self.last_sent_ts = 0
         self.hex_mode = hex_mode
         self.print_str = print_str
-        self.ser.timeout = timeout
         self.log_queue = queue.Queue()
         self.end = bytes(end, 'utf-8').decode('unicode_escape') if end else None
         self.test_mode = test_mode
@@ -91,6 +90,8 @@ class UartController:
             if cmd:
                 self.ser.write(cmd)
                 self.ser.flush()
+        except serial.SerialTimeoutException:
+            print_dbg_msg(f'TX timeout error: Write operation timed out.')
         except Exception as e:
             print_dbg_msg(f'TX error: {e}')
 
@@ -118,6 +119,7 @@ class UartController:
         print_dbg_msg(f"  Port: {self.ser.portstr}")
         print_dbg_msg(f"  Baudrate: {self.ser.baudrate}")
         print_dbg_msg(f"  Timeout: {self.ser.timeout}")
+        print_dbg_msg(f"  Write Timeout: {self.ser.write_timeout}")
         print_dbg_msg(f"  Hex Mode: {self.hex_mode}")
         print_dbg_msg(f"  总是尝试打印字符串: {self.print_str}")
         if self.hex_mode:
@@ -125,9 +127,9 @@ class UartController:
         if self.print_str or not self.hex_mode:
             print_output_str(f"  Output String: 0xff\n")
 
-    def __open_serial(self, port, baudrate):
+    def __open_serial(self, port, baudrate, timeout, write_timeout):
         try:
-            ser = serial.Serial(port=port, baudrate=baudrate, timeout=3)
+            ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout, write_timeout=write_timeout)
             if ser.is_open:
                 return ser
         except Exception as e:
@@ -270,13 +272,14 @@ def main():
     parser.add_argument('-p', '--com_port', type=str, required=True, help='COM 串口名字')
     parser.add_argument('-b', '--baurate', type=int, default=115200, help='COM 口波特率配置,默认115200')
     parser.add_argument('-t', '--timeout', type=float, default=0.1, help='COM 读写消息间隔,默认0.1')
+    parser.add_argument('-wt', '--write_timeout', type=float, default=1.0, help='COM 写消息超时时间,默认1.0')
     parser.add_argument('--hex_mode', action='store_true', default=False, help='是否使用16进制模式')
     parser.add_argument('--print_str', action='store_true', default=False, help='是否打印字符串模式')
     # allow `-e` with no value or explicit empty string to mean "no end/newline"
     parser.add_argument('-e', '--end', type=str, default='\r', nargs='?', const='', help=r"换行字符\r或者\n, 默认\r (使用 -e '' 或 -e 传空字符串表示不追加换行)")
     parser.add_argument('--test_mode', action='store_true', default=False, help='开启测试模式，发送预设命令')
     args = parser.parse_args()
-    uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.print_str, args.end, args.test_mode)
+    uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.write_timeout, args.print_str, args.end, args.test_mode)
     uart_controler.run()
 
 
