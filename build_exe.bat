@@ -28,7 +28,7 @@ echo [5/5] Build exe
 pyinstaller --clean --onefile --noconsole -n uart-tool ^
   --collect-submodules uarttool ^
   --collect-data uarttool ^
-  uarttool\main.py
+  uarttool\cli.py
 if errorlevel 1 goto :error
 
 echo.

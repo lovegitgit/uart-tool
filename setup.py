@@ -20,13 +20,12 @@ setup(
     packages=find_packages(include=['uarttool']),
     entry_points={
         'console_scripts': [
-            'uart-tool = uarttool.main:main',
-            'lsuart = uarttool.main:list_serial_ports',
+            'uart-tool = uarttool.cli:main',
+            'lsuart = uarttool.cli:list_serial_ports',
         ]
     },
     python_requires=">=3.8",
     install_requires=[
         'pyserial',
-        'colorama',
     ],
 )

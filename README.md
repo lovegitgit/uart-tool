@@ -7,25 +7,9 @@
 ### uart-tool
 
 ```shell
-uart-tool -h
-usage: uart-tool [-h] -p COM_PORT [-b BAURATE] [-t TIMEOUT] [--hex_mode] [--print_str] [-e [END]] [--test_mode]
-
-uart tool 参数
-
-options:
-  -h, --help            show this help message and exit
-  -p COM_PORT, --com_port COM_PORT
-                        COM 串口名字
-  -b BAURATE, --baurate BAURATE
-                        COM 口波特率配置,默认115200
-  -t TIMEOUT, --timeout TIMEOUT
-                        COM 读写消息间隔,默认0.1
-  --hex_mode            是否使用16进制模式
-  --print_str           是否打印字符串模式
-  -e [END], --end [END]
-                        换行字符\r或者\n, 默认\r (使用 -e '' 或 -e 传空字符串表示不追加换行)
-  --test_mode           开启测试模式，发送预设命令
+uart-tool
 ```
+启动 GUI（当前版本不再提供命令行参数）。
 
 ### lsuart
 

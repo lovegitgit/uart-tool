@@ -2,7 +2,6 @@
 # -*- encoding: utf-8 -*-
 
 import tkinter as tk
-import signal
 import os
 import traceback
 from datetime import datetime
@@ -15,12 +14,9 @@ from tkinter import font as tkfont
 
 from serial.tools import list_ports
 
-from uarttool.main import (
-    UartController,
-    convert_cmd_to_bytes,
-    parse_bytes_to_hex_str,
-    register_exit_handler,
-)
+from uarttool.uart import UartController
+from uarttool.utils import convert_cmd_to_bytes, parse_bytes_to_hex_str, get_str_info
+from uarttool.cli import register_exit_handler
 
 
 class UartTab(ttk.Frame):
@@ -114,7 +110,7 @@ class UartTab(ttk.Frame):
         self.print_str_chk.pack(side=tk.LEFT, padx=10)
 
         ttk.Label(cfg, text="Timeout").pack(side=tk.LEFT, padx=(14, 0))
-        self.timeout_var = tk.StringVar(value="0.05")
+        self.timeout_var = tk.StringVar(value="0.1")
         self.timeout_entry = ttk.Entry(cfg, textvariable=self.timeout_var, width=8)
         self.timeout_entry.pack(side=tk.LEFT, padx=6)
 
@@ -276,7 +272,6 @@ class UartTab(ttk.Frame):
                 write_timeout=wtimeout,
                 print_str=self.print_str_var.get(),
                 end=self.end_var.get(),
-                test_mode=False,
             )
             self.controller.run_no_stdin()
         except Exception as e:
