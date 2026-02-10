@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- encoding: utf-8 -*-
 
-import argparse
 import threading
 from typing import List
 import serial
@@ -14,10 +13,18 @@ from colorama import init, Fore, Style
 # 初始化 colorama（Windows 下需要）
 init(autoreset=True)
 
-g_stop_event = threading.Event()
+g_exit_callback = None
+
+def register_exit_handler(fn):
+    global g_exit_callback
+    g_exit_callback = fn
 
 def signal_handler(sig, frame):
-    g_stop_event.set()
+    if g_exit_callback:
+        try:
+            g_exit_callback()
+        except Exception:
+            pass
 
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -29,6 +36,8 @@ COLOR_DBG_MSG = Fore.LIGHTGREEN_EX
 HEX_TABLE = [f"0x{b:02x}" for b in range(256)]
 
 def print_with_color_internal(color, text, end='\n'):
+    if sys.stdout is None:
+        return
     sys.stdout.write(f"{color}{text}{Style.RESET_ALL}")
     if end:
         sys.stdout.write(end)
@@ -61,7 +70,7 @@ def print_dbg_msg(fmt, *args, **kwargs):
 
 
 class UartController:
-    def __init__(self, port: str, baudrate: int, hex_mode=False, timeout=3, write_timeout=1, print_str=False, end=None, test_mode=False):
+    def __init__(self, port: str, baudrate: int, hex_mode=False, timeout=0.05, write_timeout=1, print_str=False, end=None, test_mode=False):
         self.ser = self.__open_serial(port, baudrate, timeout, write_timeout)
         self.last_sent_ts = 0
         self.hex_mode = hex_mode
@@ -69,11 +78,11 @@ class UartController:
         self.log_queue = queue.Queue()
         self.end = bytes(end, 'utf-8').decode('unicode_escape') if end else None
         self.test_mode = test_mode
+        self.stop_event = threading.Event()
         if self.test_mode:
             self.hex_mode = True
             self.print_str = False
             print_dbg_msg('Uart Controller started in TEST MODE, only support send hex commands.')
-        self.print_info()
 
     def send_cmd(self, cmd: bytes):
         if not cmd or cmd == b'':
@@ -114,19 +123,6 @@ class UartController:
         self.send_cmd(bytes([0x5a, 0xa1]))
         sleep(2e-1)
 
-    def print_info(self):
-        print_dbg_msg("UART Info:")
-        print_dbg_msg(f"  Port: {self.ser.portstr}")
-        print_dbg_msg(f"  Baudrate: {self.ser.baudrate}")
-        print_dbg_msg(f"  Timeout: {self.ser.timeout}")
-        print_dbg_msg(f"  Write Timeout: {self.ser.write_timeout}")
-        print_dbg_msg(f"  Hex Mode: {self.hex_mode}")
-        print_dbg_msg(f"  总是尝试打印字符串: {self.print_str}")
-        if self.hex_mode:
-            print_output_hex(f"  Output Hex: 0xff")
-        if self.print_str or not self.hex_mode:
-            print_output_str(f"  Output String: 0xff\n")
-
     def __open_serial(self, port, baudrate, timeout, write_timeout):
         try:
             ser = serial.Serial(port=port, baudrate=baudrate, timeout=timeout, write_timeout=write_timeout)
@@ -141,29 +137,27 @@ class UartController:
         qput = self.log_queue.put_nowait
         # read max chunk size
         max_read = 4096
-        while not g_stop_event.is_set():
+        while not self.stop_event.is_set():
             try:
-                waiting = getattr(ser, 'in_waiting', None)
+                waiting = ser.in_waiting
                 if waiting:
                     to_read = min(waiting, max_read)
                     data = ser.read(to_read)
                 else:
-                    data = ser.read(1024)
+                    data = ser.read(1024)  # block until at least 1 byte or timeout
                 if data:
                     try:
                         qput(data)
                     except queue.Full:
-                        sleep(1e-3)
-                else:
-                    sleep(1e-3)
+                        sleep(1e-2)
             except Exception:
-                sleep(1e-3)
+                sleep(1e-2)
         self.stop()
 
     def log_serial_data(self):
         hex_mode = self.hex_mode
         print_str_flag = self.print_str
-        while not g_stop_event.is_set():
+        while not self.stop_event.is_set():
             try:
                 data = self.log_queue.get(timeout=0.2)
             except queue.Empty:
@@ -185,7 +179,7 @@ class UartController:
         """
         Read from stdin and send. Input is string; append end (string) if configured.
         """
-        while not g_stop_event.is_set():
+        while not self.stop_event.is_set():
             try:
                 cmd = input()
             except (EOFError, KeyboardInterrupt):
@@ -217,14 +211,15 @@ class UartController:
         if self.test_mode:
             self.test()
 
+    def run_no_stdin(self):
+        self.__start_rx_thread()
+        if self.test_mode:
+            self.test()
+
     def stop(self):
-        g_stop_event.set()
+        self.stop_event.set()
         try:
             if self.ser and self.ser.is_open:
-                try:
-                    self.ser.flush()
-                except Exception:
-                    pass
                 try:
                     self.ser.close()
                 except Exception:
@@ -266,21 +261,9 @@ def list_serial_ports():
         uart_dsc = f' {p.device}: {p.description}'
         print_dbg_msg(uart_dsc)
 
-
 def main():
-    parser = argparse.ArgumentParser(description='uart tool 参数')
-    parser.add_argument('-p', '--com_port', type=str, required=True, help='COM 串口名字')
-    parser.add_argument('-b', '--baurate', type=int, default=115200, help='COM 口波特率配置,默认115200')
-    parser.add_argument('-t', '--timeout', type=float, default=0.1, help='COM 读写消息间隔,默认0.1')
-    parser.add_argument('-wt', '--write_timeout', type=float, default=1.0, help='COM 写消息超时时间,默认1.0')
-    parser.add_argument('--hex_mode', action='store_true', default=False, help='是否使用16进制模式')
-    parser.add_argument('--print_str', action='store_true', default=False, help='是否打印字符串模式')
-    # allow `-e` with no value or explicit empty string to mean "no end/newline"
-    parser.add_argument('-e', '--end', type=str, default='\r', nargs='?', const='', help=r"换行字符\r或者\n, 默认\r (使用 -e '' 或 -e 传空字符串表示不追加换行)")
-    parser.add_argument('--test_mode', action='store_true', default=False, help='开启测试模式，发送预设命令')
-    args = parser.parse_args()
-    uart_controler = UartController(args.com_port, args.baurate, args.hex_mode, args.timeout, args.write_timeout, args.print_str, args.end, args.test_mode)
-    uart_controler.run()
+    from uarttool.gui import run_gui
+    run_gui()
 
 
 if __name__ == '__main__':
