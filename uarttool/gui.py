@@ -36,6 +36,9 @@ class UartTab(ttk.Frame):
         self.rx_update_pending = False
         self.rx_gui_queue = queue.Queue()
         self.ansi_carry = ""
+        self.rx_autoscroll = True
+        self.rx_force_scroll_once = False
+        self._rx_internal_scroll = False
 
         self._build_ui()
         self._apply_rx_font_size()
@@ -180,9 +183,13 @@ class UartTab(ttk.Frame):
 
         self.rx_text = tk.Text(rx_frame, wrap="word", height=18, state="disabled", font=self.mono_font)
         self.rx_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        rx_scroll = ttk.Scrollbar(rx_frame, command=self.rx_text.yview)
+        rx_scroll = ttk.Scrollbar(rx_frame, command=self._on_rx_scrollbar)
         rx_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.rx_text.configure(yscrollcommand=rx_scroll.set)
+        self.rx_text.bind("<MouseWheel>", self._on_rx_user_scroll)
+        self.rx_text.bind("<Button-4>", self._on_rx_user_scroll)
+        self.rx_text.bind("<Button-5>", self._on_rx_user_scroll)
+        self.rx_text.bind("<KeyRelease>", self._on_rx_user_scroll)
 
         tx_frame = ttk.Labelframe(io, text="TX", padding=4)
         tx_frame.pack(fill=tk.X, pady=(10, 0))
@@ -303,6 +310,8 @@ class UartTab(ttk.Frame):
         text = self.tx_var.get()
         self._push_history(text)
         self._send_payload(text)
+        # Treat the next RX chunk as the response to latest TX and follow to bottom once.
+        self.rx_force_scroll_once = True
         self.tx_var.set("")
         self.tx_history_index = len(self.tx_history)
 
@@ -431,13 +440,21 @@ class UartTab(ttk.Frame):
     def _append_rx(self, text: str):
         self.rx_text.configure(state="normal")
         self.rx_text.insert(tk.END, text)
-        self.rx_text.see(tk.END)
+        should_scroll = self.rx_autoscroll or self.rx_force_scroll_once
+        if should_scroll:
+            self._rx_internal_scroll = True
+            self.rx_text.see(tk.END)
+            self._rx_internal_scroll = False
+            self.rx_autoscroll = True
+            self.rx_force_scroll_once = False
         self.rx_text.configure(state="disabled")
 
     def _clear_rx(self):
         self.rx_text.configure(state="normal")
         self.rx_text.delete("1.0", tk.END)
         self.rx_text.configure(state="disabled")
+        self.rx_autoscroll = True
+        self.rx_force_scroll_once = False
 
     def _export_rx(self):
         port = self.port_var.get().strip() or "uart"
@@ -579,6 +596,23 @@ class UartTab(ttk.Frame):
             self.tx_var.set("")
         self.tx_entry.icursor(tk.END)
         return "break"
+
+    def _on_rx_scrollbar(self, *args):
+        self.rx_text.yview(*args)
+        if not self._rx_internal_scroll:
+            self._update_rx_autoscroll_state()
+
+    def _on_rx_user_scroll(self, _event=None):
+        self.after_idle(self._update_rx_autoscroll_state)
+
+    def _update_rx_autoscroll_state(self):
+        if self._rx_internal_scroll:
+            return
+        try:
+            _first, last = self.rx_text.yview()
+            self.rx_autoscroll = float(last) >= 0.999
+        except Exception:
+            self.rx_autoscroll = True
 
     def on_close(self):
         self._disconnect()
