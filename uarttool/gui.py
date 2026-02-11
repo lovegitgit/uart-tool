@@ -602,7 +602,15 @@ class UartTab(ttk.Frame):
         if not self._rx_internal_scroll:
             self._update_rx_autoscroll_state()
 
-    def _on_rx_user_scroll(self, _event=None):
+    def _on_rx_user_scroll(self, event=None):
+        # Wheel up means user intent to inspect history; stop auto-follow
+        # immediately so incoming RX data does not snap view back to bottom.
+        if event is not None:
+            num = getattr(event, "num", None)
+            delta = getattr(event, "delta", 0)
+            is_scroll_up = (num == 4) or (delta > 0)
+            if is_scroll_up:
+                self.rx_autoscroll = False
         self.after_idle(self._update_rx_autoscroll_state)
 
     def _update_rx_autoscroll_state(self):
