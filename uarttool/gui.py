@@ -54,20 +54,90 @@ class UartTab(ttk.Frame):
         self.bind("<<RxData>>", self._on_rx_event)
 
     def _build_ui(self):
-        main = ttk.Frame(self, padding=10)
+        main = ttk.Frame(self, padding=3)
         main.pack(fill=tk.BOTH, expand=True)
 
-        top = ttk.Frame(main)
+        # Right-click the tab header to open settings (port/baud/connect/options).
+        self._build_settings_window()
+
+        io = ttk.Frame(main)
+        io.pack(fill=tk.BOTH, expand=True, pady=(0, 0))
+
+        rx_frame = ttk.Frame(io, padding=1, relief=tk.FLAT)
+        rx_frame.pack(fill=tk.BOTH, expand=True)
+
+        rx_header = ttk.Frame(rx_frame)
+        rx_header.pack(fill=tk.X, pady=(0, 1))
+        ttk.Label(rx_header, text="RX Log").pack(side=tk.LEFT)
+        ttk.Button(rx_header, text="Export", command=self._export_rx).pack(side=tk.RIGHT, padx=(6, 0))
+        ttk.Button(rx_header, text="Clear", command=self._clear_rx).pack(side=tk.RIGHT)
+        spacer = tk.Frame(rx_header, width=30)
+        spacer.pack(side=tk.RIGHT)
+        ttk.Button(
+            rx_header,
+            text="Close Tab",
+            command=self._confirm_close_tab,
+        ).pack(side=tk.RIGHT, padx=(32, 0))
+
+        self.rx_text = tk.Text(rx_frame, wrap="word", height=18, state="disabled", font=self.mono_font)
+        self.rx_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        rx_scroll = ttk.Scrollbar(rx_frame, command=self._on_rx_scrollbar)
+        rx_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.rx_text.configure(yscrollcommand=rx_scroll.set)
+        self.rx_text.bind("<MouseWheel>", self._on_rx_user_scroll)
+        self.rx_text.bind("<Button-4>", self._on_rx_user_scroll)
+        self.rx_text.bind("<Button-5>", self._on_rx_user_scroll)
+        self.rx_text.bind("<KeyRelease>", self._on_rx_user_scroll)
+
+        tx_frame = ttk.Labelframe(io, text="TX", padding=4)
+        tx_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.tx_var = tk.StringVar()
+        self.tx_entry = ttk.Entry(tx_frame, textvariable=self.tx_var, font=self.mono_font)
+        self.tx_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.tx_entry.bind("<Return>", lambda _e: self._send_tx())
+        self.tx_entry.bind("<Up>", self._on_tx_history_up)
+        self.tx_entry.bind("<Down>", self._on_tx_history_down)
+        ttk.Button(tx_frame, text="Send", command=self._send_tx).pack(side=tk.LEFT, padx=6)
+
+        note = ttk.Label(main, text="Tip: Select RX text and press Ctrl+C to copy selection.")
+        note.pack(anchor="w", pady=(8, 0))
+
+    def _build_settings_window(self):
+        """Create the floating settings window shown when right-clicking the tab header."""
+        # Shared variables across widgets
+        self.port_var = tk.StringVar()
+        self.baud_var = tk.StringVar(value="115200")
+        self.timeout_var = tk.StringVar(value="0.1")
+        self.wtimeout_var = tk.StringVar(value="1.0")
+        self.end_var = tk.StringVar(value="\\r")
+        self.poll_ms_var = tk.StringVar(value="50")
+        self.rx_color_var = tk.StringVar(value="Default")
+        self.hex_var = tk.BooleanVar(value=False)
+        self.print_str_var = tk.BooleanVar(value=False)
+        self.encoding_var = tk.StringVar(value="utf-8")
+        self.strip_ansi_var = tk.BooleanVar(value=True)
+        self.normalize_ctrl_var = tk.BooleanVar(value=True)
+
+        self.settings_win = tk.Toplevel(self)
+        self.settings_win.withdraw()
+        self.settings_win.title("UART Settings")
+        self.settings_win.resizable(False, False)
+        self.settings_win.attributes("-topmost", True)
+        self.settings_win.protocol("WM_DELETE_WINDOW", self.settings_win.withdraw)
+
+        frame = ttk.Frame(self.settings_win, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        top = ttk.Frame(frame)
         top.pack(fill=tk.X)
 
         ttk.Label(top, text="Port").pack(side=tk.LEFT)
-        self.port_var = tk.StringVar()
         self.port_combo = ttk.Combobox(top, textvariable=self.port_var, width=24, state="readonly")
         self.port_combo.pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="Refresh", command=self._refresh_ports).pack(side=tk.LEFT)
 
         ttk.Label(top, text="Baud").pack(side=tk.LEFT, padx=(14, 0))
-        self.baud_var = tk.StringVar(value="115200")
         self.baud_entry = ttk.Combobox(
             top,
             textvariable=self.baud_var,
@@ -100,12 +170,8 @@ class UartTab(ttk.Frame):
         self.connect_btn = ttk.Button(top, text="Connect", command=self._toggle_connect)
         self.connect_btn.pack(side=tk.LEFT, padx=(10, 0))
 
-
-        cfg = ttk.Labelframe(main, text="Options", padding=10)
+        cfg = ttk.Labelframe(frame, text="Options", padding=10)
         cfg.pack(fill=tk.X, pady=(10, 0))
-
-        self.hex_var = tk.BooleanVar(value=False)
-        self.print_str_var = tk.BooleanVar(value=False)
 
         self.hex_chk = ttk.Checkbutton(cfg, text="Hex Mode", variable=self.hex_var, command=self._on_hex_toggle)
         self.hex_chk.pack(side=tk.LEFT)
@@ -113,17 +179,14 @@ class UartTab(ttk.Frame):
         self.print_str_chk.pack(side=tk.LEFT, padx=10)
 
         ttk.Label(cfg, text="Timeout").pack(side=tk.LEFT, padx=(14, 0))
-        self.timeout_var = tk.StringVar(value="0.1")
         self.timeout_entry = ttk.Entry(cfg, textvariable=self.timeout_var, width=8)
         self.timeout_entry.pack(side=tk.LEFT, padx=6)
 
         ttk.Label(cfg, text="Write Timeout").pack(side=tk.LEFT, padx=(14, 0))
-        self.wtimeout_var = tk.StringVar(value="1.0")
         self.wtimeout_entry = ttk.Entry(cfg, textvariable=self.wtimeout_var, width=8)
         self.wtimeout_entry.pack(side=tk.LEFT, padx=6)
 
         ttk.Label(cfg, text="End").pack(side=tk.LEFT, padx=(14, 0))
-        self.end_var = tk.StringVar(value="\\r")
         self.end_entry = ttk.Combobox(
             cfg,
             textvariable=self.end_var,
@@ -136,7 +199,6 @@ class UartTab(ttk.Frame):
         self.end_entry.bind("<KeyRelease>", lambda _e: self._on_end_change())
 
         ttk.Label(cfg, text="Poll ms").pack(side=tk.LEFT, padx=(14, 0))
-        self.poll_ms_var = tk.StringVar(value="50")
         self.poll_ms_entry = ttk.Entry(cfg, textvariable=self.poll_ms_var, width=6)
         self.poll_ms_entry.pack(side=tk.LEFT, padx=6)
 
@@ -152,13 +214,7 @@ class UartTab(ttk.Frame):
         self.rx_font_entry.pack(side=tk.LEFT, padx=6)
         self.rx_font_entry.bind("<KeyRelease>", lambda _e: self._apply_rx_font_size())
 
-        # encoding + ANSI/CR-BS normalization use defaults (no UI)
-        self.encoding_var = tk.StringVar(value="utf-8")
-        self.strip_ansi_var = tk.BooleanVar(value=True)
-        self.normalize_ctrl_var = tk.BooleanVar(value=True)
-
         ttk.Label(cfg, text="RX Color").pack(side=tk.LEFT, padx=(14, 0))
-        self.rx_color_var = tk.StringVar(value="Default")
         self.rx_color_entry = ttk.Combobox(
             cfg,
             textvariable=self.rx_color_var,
@@ -169,41 +225,23 @@ class UartTab(ttk.Frame):
         self.rx_color_entry.pack(side=tk.LEFT, padx=6)
         self.rx_color_entry.bind("<<ComboboxSelected>>", lambda _e: self._apply_rx_color())
 
-        io = ttk.Frame(main)
-        io.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        btn_row = ttk.Frame(frame)
+        btn_row.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(btn_row, text="Close", command=self.settings_win.withdraw).pack(side=tk.RIGHT)
+        ttk.Button(btn_row, text="Close Tab", command=lambda: self.app.close_tab(self)).pack(side=tk.LEFT)
 
-        rx_frame = ttk.Labelframe(io, text="", padding=4)
-        rx_frame.pack(fill=tk.BOTH, expand=True)
-
-        rx_header = ttk.Frame(rx_frame)
-        rx_header.pack(fill=tk.X, pady=(0, 2))
-        ttk.Label(rx_header, text="RX Log").pack(side=tk.LEFT)
-        ttk.Button(rx_header, text="Export", command=self._export_rx).pack(side=tk.RIGHT, padx=(6, 0))
-        ttk.Button(rx_header, text="Clear", command=self._clear_rx).pack(side=tk.RIGHT)
-
-        self.rx_text = tk.Text(rx_frame, wrap="word", height=18, state="disabled", font=self.mono_font)
-        self.rx_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        rx_scroll = ttk.Scrollbar(rx_frame, command=self._on_rx_scrollbar)
-        rx_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.rx_text.configure(yscrollcommand=rx_scroll.set)
-        self.rx_text.bind("<MouseWheel>", self._on_rx_user_scroll)
-        self.rx_text.bind("<Button-4>", self._on_rx_user_scroll)
-        self.rx_text.bind("<Button-5>", self._on_rx_user_scroll)
-        self.rx_text.bind("<KeyRelease>", self._on_rx_user_scroll)
-
-        tx_frame = ttk.Labelframe(io, text="TX", padding=4)
-        tx_frame.pack(fill=tk.X, pady=(10, 0))
-
-        self.tx_var = tk.StringVar()
-        self.tx_entry = ttk.Entry(tx_frame, textvariable=self.tx_var, font=self.mono_font)
-        self.tx_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.tx_entry.bind("<Return>", lambda _e: self._send_tx())
-        self.tx_entry.bind("<Up>", self._on_tx_history_up)
-        self.tx_entry.bind("<Down>", self._on_tx_history_down)
-        ttk.Button(tx_frame, text="Send", command=self._send_tx).pack(side=tk.LEFT, padx=6)
-
-        note = ttk.Label(main, text="Tip: Select RX text and press Ctrl+C to copy selection.")
-        note.pack(anchor="w", pady=(8, 0))
+    def show_settings_popup(self, x_root: int, y_root: int):
+        """Show the settings window near the mouse pointer when the tab is right-clicked."""
+        try:
+            if not self.settings_win.winfo_exists():
+                self._build_settings_window()
+        except Exception:
+            self._build_settings_window()
+        self._refresh_ports()
+        self.settings_win.deiconify()
+        self.settings_win.lift()
+        self.settings_win.geometry(f"+{x_root}+{y_root}")
+        self.settings_win.focus_force()
 
     def _init_mono_font(self):
         candidates = ["DejaVu Sans Mono", "Consolas", "Cascadia Mono", "Courier New"]
@@ -456,6 +494,10 @@ class UartTab(ttk.Frame):
         self.rx_autoscroll = True
         self.rx_force_scroll_once = False
 
+    def _confirm_close_tab(self):
+        if messagebox.askyesno("UART Tool", "Close this tab? Current connection will be disconnected."):
+            self.app.close_tab(self)
+
     def _export_rx(self):
         port = self.port_var.get().strip() or "uart"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -624,6 +666,11 @@ class UartTab(ttk.Frame):
 
     def on_close(self):
         self._disconnect()
+        try:
+            if hasattr(self, "settings_win") and self.settings_win.winfo_exists():
+                self.settings_win.destroy()
+        except Exception:
+            pass
 
 
 class UartGuiApp:
@@ -639,29 +686,43 @@ class UartGuiApp:
         container = ttk.Frame(self.root)
         container.pack(fill=tk.BOTH, expand=True)
 
-        toolbar = ttk.Frame(container, padding=6)
-        toolbar.pack(fill=tk.X)
-        ttk.Button(toolbar, text="New Tab", command=self._new_tab).pack(side=tk.LEFT)
-        ttk.Button(toolbar, text="Close Tab", command=self._close_current_tab).pack(side=tk.LEFT, padx=6)
-
         self.notebook = ttk.Notebook(container)
         self.notebook.pack(fill=tk.BOTH, expand=True)
 
         self.tabs = []
+        self.add_tab = None
+        self._add_plus_tab()
         self._new_tab()
 
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.notebook.bind("<Button-3>", self._on_tab_right_click)
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _add_plus_tab(self):
+        if self.add_tab is not None:
+            return
+        self.add_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.add_tab, text="+")
 
     def _new_tab(self):
         tab = UartTab(self, self.notebook, label=f"Tab {len(self.tabs) + 1}")
         self.tabs.append(tab)
-        self.notebook.add(tab, text=tab.label)
+        if self.add_tab is not None:
+            add_idx = self.notebook.index(self.add_tab)
+            self.notebook.insert(add_idx, tab, text=tab.label)
+        else:
+            self.notebook.add(tab, text=tab.label)
         self.notebook.select(tab)
 
     def create_tab(self) -> UartTab:
         tab = UartTab(self, self.notebook, label=f"Tab {len(self.tabs) + 1}")
         self.tabs.append(tab)
-        self.notebook.add(tab, text=tab.label)
+        if self.add_tab is not None:
+            add_idx = self.notebook.index(self.add_tab)
+            self.notebook.insert(add_idx, tab, text=tab.label)
+        else:
+            self.notebook.add(tab, text=tab.label)
         return tab
 
     def select_tab(self, tab: UartTab):
@@ -670,6 +731,27 @@ class UartGuiApp:
     def rename_tab(self, tab: UartTab, name: str):
         idx = self.notebook.index(tab)
         self.notebook.tab(idx, text=name)
+
+    def _on_tab_changed(self, _event):
+        current = self.notebook.select()
+        if self.add_tab is not None and current == str(self.add_tab):
+            self._new_tab()
+
+    def _on_tab_right_click(self, event):
+        try:
+            idx = self.notebook.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            return
+        tabs = self.notebook.tabs()
+        if idx >= len(tabs):
+            return
+        tab_id = tabs[idx]
+        if self.add_tab is not None and tab_id == str(self.add_tab):
+            return
+        target = next((t for t in self.tabs if str(t) == tab_id), None)
+        if target is not None:
+            target.show_settings_popup(event.x_root, event.y_root)
+            self.notebook.select(target)
 
     def log_error(self, tag: str, err: Exception):
         try:
@@ -715,21 +797,25 @@ class UartGuiApp:
         except Exception:
             os._exit(0)
 
-    def _close_current_tab(self):
-        if not self.tabs:
+    def close_tab(self, tab: UartTab):
+        if tab not in self.tabs:
             return
+        tab.on_close()
+        idx = self.notebook.index(tab)
+        self.notebook.forget(tab)
+        self.tabs.remove(tab)
+        if self.tabs:
+            self.notebook.select(self.tabs[min(idx, len(self.tabs) - 1)])
+
+    def _close_current_tab(self):
         current = self.notebook.select()
         if not current:
             return
-        for tab in list(self.tabs):
-            if str(tab) == current:
-                tab.on_close()
-                idx = self.notebook.index(tab)
-                self.notebook.forget(tab)
-                self.tabs.remove(tab)
-                if self.tabs:
-                    self.notebook.select(self.tabs[min(idx, len(self.tabs) - 1)])
-                break
+        if self.add_tab is not None and current == str(self.add_tab):
+            return
+        target = next((t for t in self.tabs if str(t) == current), None)
+        if target:
+            self.close_tab(target)
 
 
 def run_gui():
